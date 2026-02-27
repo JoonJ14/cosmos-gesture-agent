@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -9,6 +10,11 @@ from pydantic import BaseModel
 
 from .schema_validate import validate_response
 from .stub_logic import build_stub_response
+from .nim_logic import call_cosmos_nim
+
+# Set NIM_ENABLED=1 to route verify requests through the real Cosmos NIM.
+# Leave unset (or set to 0) to use the stub (fast, no GPU required).
+NIM_ENABLED = os.environ.get("NIM_ENABLED", "0") == "1"
 
 Intent = Literal["OPEN_MENU", "CLOSE_MENU", "SWITCH_RIGHT", "SWITCH_LEFT"]
 
@@ -79,11 +85,22 @@ def verify(req: VerifyRequest, force_reject: bool = Query(default=False)) -> Ver
     combined_force_reject = force_reject or req.force_reject
 
     try:
-        response_json = build_stub_response(
-            event_id=req.event_id,
-            proposed_intent=req.proposed_intent,
-            force_reject=combined_force_reject,
-        )
+        nim_called = NIM_ENABLED and not combined_force_reject
+
+        if nim_called:
+            response_json = call_cosmos_nim(
+                proposed_intent=req.proposed_intent,
+                frames=req.frames,
+                landmark_summary_json=req.landmark_summary_json,
+                local_confidence=req.local_confidence,
+                force_reject=False,
+            )
+        else:
+            response_json = build_stub_response(
+                event_id=req.event_id,
+                proposed_intent=req.proposed_intent,
+                force_reject=combined_force_reject,
+            )
 
         schema_valid, schema_error = validate_response(response_json)
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
@@ -91,7 +108,7 @@ def verify(req: VerifyRequest, force_reject: bool = Query(default=False)) -> Ver
             "event_id": req.event_id,
             "ts_request_received_unix": ts_request_received_unix,
             "proposed_intent": req.proposed_intent,
-            "nim_called": False,
+            "nim_called": nim_called,
             "latency_ms": latency_ms,
             "response_json": response_json,
             "schema_valid": schema_valid,
@@ -115,7 +132,7 @@ def verify(req: VerifyRequest, force_reject: bool = Query(default=False)) -> Ver
                     "event_id": req.event_id,
                     "ts_request_received_unix": ts_request_received_unix,
                     "proposed_intent": req.proposed_intent,
-                    "nim_called": False,
+                    "nim_called": NIM_ENABLED,
                     "latency_ms": latency_ms,
                     "response_json": None,
                     "schema_valid": False,
@@ -132,7 +149,7 @@ def verify(req: VerifyRequest, force_reject: bool = Query(default=False)) -> Ver
                 "event_id": req.event_id,
                 "ts_request_received_unix": ts_request_received_unix,
                 "proposed_intent": req.proposed_intent,
-                "nim_called": False,
+                "nim_called": NIM_ENABLED,
                 "latency_ms": latency_ms,
                 "response_json": None,
                 "schema_valid": False,
