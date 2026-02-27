@@ -1,68 +1,202 @@
-# SYSTEM_ARCHITECTURE
+# System Architecture
+
+## Design principles
+
+1. **Fast local perception, slow intelligent verification.** The browser detects gestures at 30+ fps. Cosmos reasons about intent only when needed. Users feel instant response; Cosmos adds correctness.
+2. **Services communicate only via HTTP.** The browser cannot press OS keys, and should not call Cosmos directly. Each component has a single responsibility and a clean API boundary.
+3. **Cross-platform from day one.** The same web app runs on macOS and Linux. Platform differences are isolated in the executor backend and the `actions.yaml` config.
+4. **Log everything for Option 2.** Every proposal, verification, and execution writes JSONL with a shared `event_id`. This enables the teacher-student feedback loop later without retrofitting.
 
 ## Components
-1. **Web app (`web/`)**
-- Captures webcam stream.
-- Runs MediaPipe Hands for landmarks.
-- Produces intent proposal (currently keyboard-triggered stub).
-- Enforces runtime policy:
-  - Safe Mode ON: call verifier before executor.
-  - Safe Mode OFF: direct executor call.
-- Emits structured timing logs in browser console with shared `event_id`.
 
-2. **Verifier service (`verifier/`)**
-- HTTP API: receives `event_id` and proposed intent.
-- Returns strict JSON that must validate against `shared/schema.json`.
-- Current behavior: deterministic stub with optional forced reject path.
-- Writes JSONL logs for observability and schema-validity tracking.
+### 1. Web App (`web/`, JavaScript, port 5173)
 
-3. **Executor service (`executor/`)**
-- HTTP API: receives final intent and event metadata.
-- Loads key mappings from `actions.yaml` by OS and intent.
-- Executes key injection:
+Runs in browser on macOS and Linux identically.
+
+**Responsibilities:**
+- Webcam capture via `getUserMedia`
+- MediaPipe Hands (JS) for real-time hand landmark detection at 30+ fps
+- Gesture state machine: classifies landmark trajectories into intent proposals with local confidence scores
+- Ring buffer: stores the last ~1 second of sampled frames (~8–12 frames) for evidence windows sent to the verifier
+- Confidence-gated routing: decides whether to execute directly, verify first, or ignore (see Decision Logic below)
+- Overlay UI: shows landmarks, gesture state, verification status
+- Structured console logs with shared `event_id` and timing data
+
+**Why JavaScript:** MediaPipe Python achieved only 8–10 fps on Mac Air. MediaPipe JS with WebGL achieves 30+ fps in the browser. Since all backend services are HTTP, the frontend language is independent of the backend.
+
+### 2. Action Executor (`executor/`, Python FastAPI, port 8787)
+
+Runs locally on the same machine as the web app.
+
+**Responsibilities:**
+- Receives intent commands via `POST /execute`
+- Loads key mappings from `actions.yaml`, selects by detected OS
+- Injects OS key events:
   - Linux GNOME X11: `xdotool key <combo>`
-  - macOS: `osascript` (System Events)
-- Writes JSONL logs with latency and execution outcome.
+  - macOS: `osascript` with System Events (requires Accessibility permission)
+- Writes JSONL to `executor/logs/executor_events.jsonl`
+- Supports `dry_run` mode for testing without key injection
 
-4. **Shared contract (`shared/schema.json`)**
-- Single strict schema for verifier response.
-- Used by verifier runtime validation and downstream integrations.
+### 3. Cosmos Verifier (`verifier/`, Python FastAPI, port 8788)
+
+Runs on DGX Spark (or locally for development with stub logic).
+
+**Responsibilities:**
+- Receives proposed intent + evidence via `POST /verify`
+- Calls Cosmos Reason 2 NIM via OpenAI-compatible `/v1/chat/completions`
+- Validates response against `shared/schema.json` — rejects malformed model output
+- Returns structured JSON: intentional yes/no, final intent, confidence, reason category, rationale
+- Writes JSONL to `verifier/logs/verifier_events.jsonl`
+- Falls back to stub logic when Cosmos NIM is not configured (for local development)
+
+**Cosmos NIM URL must be configurable** via environment variable (`COSMOS_NIM_URL`). This enables:
+- DGX-only mode: verifier calls `http://localhost:<nim_port>/v1/chat/completions`
+- Mac + DGX mode: verifier on DGX is called from Mac's web app at `http://<dgx_ip>:8788/verify`
+
+### 4. Cosmos Reason 2 NIM (DGX Spark)
+
+- NVIDIA Inference Microservice running Cosmos Reason 2
+- OpenAI-compatible API at `/v1/chat/completions`
+- Accepts multimodal input: base64 image frames + text prompt
+- Based on Qwen3-VL architecture, runs on Blackwell GPU
+- Apache 2.0 source, NVIDIA Open Model License for weights
+
+### 5. Shared Contract (`shared/schema.json`)
+
+Single strict JSON Schema for all verifier responses. 7 required fields, no additional properties. Used by:
+- Verifier runtime validation (rejects non-conforming Cosmos output)
+- Web app response parsing
+- Future evaluation and training pipelines
 
 ## API contracts
-### Verifier API
-- `GET /health` -> `{ "status": "ok" }`
-- `POST /verify`
-  - Request:
-    - `event_id` (required)
-    - `proposed_intent` (required)
-    - `frames` (optional)
-    - `landmark_summary_json` (optional)
-    - `local_confidence` (optional)
-    - `force_reject` (optional test flag)
-  - Response: strict schema object (`shared/schema.json`).
 
-### Executor API
-- `GET /health` -> `{ "status": "ok" }`
-- `POST /execute`
-  - Request:
-    - `intent` (required)
-    - `event_id` (optional; generated if missing)
-    - `dry_run` (optional, default `false`)
-    - `source` (optional, default `web`)
-  - Response:
-    - `ok`, `executed`, `intent`, `event_id`, `key_combo`, `detail`
+### Executor: `POST /execute`
 
-## Deployment modes
-- **Local all-in-one**: web + verifier + executor on a single workstation.
-- **Split services**: web on one machine, verifier/executor on another host, connected via HTTP.
-- **Future edge/cloud hybrid**: local proposal + cloud verifier + local executor.
+Request:
+```json
+{
+  "intent": "OPEN_MENU|CLOSE_MENU|SWITCH_RIGHT|SWITCH_LEFT",
+  "event_id": "string (optional, generated if missing)",
+  "dry_run": false,
+  "source": "web"
+}
+```
 
-## Logging and observability
-All components correlate by shared `event_id`:
-- Web console structured timing object.
-- Verifier JSONL: request time, latency, schema validity, response payload.
-- Executor JSONL: mapping used, execution result, OS, latency.
+Response:
+```json
+{
+  "ok": true,
+  "executed": true,
+  "intent": "OPEN_MENU",
+  "event_id": "evt-...",
+  "key_combo": "Super_L",
+  "detail": "key event dispatched"
+}
+```
+
+### Verifier: `POST /verify`
+
+Request:
+```json
+{
+  "event_id": "string (required)",
+  "proposed_intent": "SWITCH_RIGHT",
+  "frames": ["base64-jpeg-1", "base64-jpeg-2", "...8-12 frames"],
+  "landmark_summary_json": { "handedness": "Right", "trajectory": [...], "palm_facing": true },
+  "local_confidence": 0.73
+}
+```
+
+Response (must validate against `shared/schema.json`):
+```json
+{
+  "version": "1.0",
+  "proposed_intent": "SWITCH_RIGHT",
+  "final_intent": "SWITCH_RIGHT",
+  "intentional": true,
+  "confidence": 0.87,
+  "reason_category": "intentional_command",
+  "rationale": "User is facing screen with deliberate lateral hand motion directed at camera."
+}
+```
 
 ## Runtime decision logic
-Decision path (verifier-first, timeout behavior, fallback policy) is defined in:
-- `docs/LATENCY_AND_AMBIGUOUS_POLICY.md`
+
+The web app applies a confidence-gated routing policy:
+
+```
+Gesture detected → local_confidence computed
+    │
+    ├── confidence ≥ HIGH threshold → Execute immediately (fast mode)
+    │
+    ├── LOW < confidence < HIGH     → Call Cosmos verifier
+    │       │
+    │       ├── Cosmos approves (intentional=true, final_intent≠NONE) → Execute
+    │       ├── Cosmos rejects  → Do NOT execute, log rejection
+    │       └── Cosmos timeout  → Do NOT execute, log timeout
+    │
+    └── confidence ≤ LOW threshold  → Ignore (do not propose, do not call Cosmos)
+```
+
+**Current implementation:** Safe Mode toggle (ON = always verify, OFF = always execute directly). Three-tier routing is designed but not yet in code — it replaces Safe Mode once real confidence scores are available.
+
+**Timeout policy:** If verifier does not respond within the configured timeout (default 800ms), the gesture is NOT executed. This prevents late verification from causing stale actions. See `docs/LATENCY_AND_AMBIGUOUS_POLICY.md` for details.
+
+## Data flow to the verifier
+
+When a gesture proposal triggers Cosmos verification:
+
+1. Web app grabs the last ~1 second from the ring buffer (~8–12 frames sampled at even intervals)
+2. Frames are JPEG-encoded and base64-encoded in the browser
+3. A landmark summary JSON is constructed: handedness, palm center trajectory over the window, finger extension states, palm facing score
+4. The payload (proposed intent + frames + landmarks + local confidence) is POSTed to the verifier
+5. The verifier constructs a multimodal prompt with the frames as base64 images and the landmark summary as text context
+6. Cosmos Reason 2 returns structured JSON which the verifier validates against the schema
+
+## Deployment modes
+
+### DGX-only mode (primary for competition)
+All four components run on DGX Spark. Webcam is connected to DGX. No network latency for verification. Best for stable demo and reproducibility.
+
+```
+DGX Spark:
+  Browser (Chromium) → Web App (:5173)
+  Web App → Executor (:8787)  → xdotool → GNOME desktop
+  Web App → Verifier (:8788)  → Cosmos NIM (localhost) → response
+```
+
+### Mac + DGX mode (development and secondary demo)
+Web app and executor run on MacBook Air. Verifier and Cosmos NIM run on DGX Spark, accessible over the local network.
+
+```
+MacBook Air:
+  Browser (Chrome) → Web App (:5173)
+  Web App → Executor (:8787, localhost) → osascript → macOS desktop
+  Web App → Verifier (:8788, DGX_IP) → Cosmos NIM → response
+
+DGX Spark:
+  Verifier (:8788) → Cosmos NIM (localhost)
+```
+
+**Requirement for Mac+DGX mode:** The verifier base URL in the web app must be configurable (not hardcoded to localhost). The web app currently hardcodes `http://127.0.0.1:8788` in `api.js` — this must be made configurable via a UI input or URL parameter.
+
+### Stub mode (offline development)
+Same as DGX-only or Mac-only, but the verifier uses stub logic (always approve or force-reject) instead of calling Cosmos. Useful for developing gesture detection without DGX access.
+
+## Logging and observability
+
+All components correlate via shared `event_id`:
+
+| Component | Log file | Key fields |
+|-----------|----------|------------|
+| Web App | Browser console (structured JSON) | event_id, proposed_intent, local_confidence, policy_path, timing timestamps, merge_count |
+| Verifier | `verifier/logs/verifier_events.jsonl` | event_id, proposed_intent, nim_called, latency_ms, response_json, schema_valid |
+| Executor | `executor/logs/executor_events.jsonl` | event_id, intent, key_combo, executed, dry_run, os_name, latency_ms |
+
+**Timing fields captured in web app per event:**
+- `proposal_start_ms` — when gesture was first detected
+- `verify_send_ms` / `verify_recv_ms` — verifier round-trip
+- `exec_send_ms` / `exec_recv_ms` — executor round-trip
+- `latency_e2e_ms` — total from detection to execution
+
+These enable latency analysis, timeout tuning, and Option 2 disagreement tracking.

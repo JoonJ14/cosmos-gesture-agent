@@ -1,166 +1,129 @@
-# cosmos-gesture-intention-detection
+# Cosmos Gesture Agent
 
-Real-time webcam gesture agent scaffold for NVIDIA Cosmos Cookoff.
+**A real-time webcam gesture agent with VLM-based intent verification — solving the false positive problem in continuous spatial tracking.**
 
-## Architecture Diagram
-```text
-                 ┌──────────────────────────────────────────────┐
-                 │               Web App (JS)                   │
-                 │  MediaPipe Hands (browser)                   │
-                 │  Gesture state machine + confidence          │
-                 │  Ring buffer: last ~1s frames                │
-                 │  UI overlay + event log view                 │
-                 └───────────────┬──────────────────────────────┘
-                                 │
-                 proposes intent │  POST /execute
-                 and decides     │  { intent, event_id }
-                 whether to      v
-                 verify          ┌──────────────────────────────┐
-                                 │      Action Executor (PY)    │
-                                 │   FastAPI on localhost       │
-                                 │   Reads actions.yaml         │
-                                 │   Sends OS key events        │
-                                 │   Linux GNOME X11: xdotool   │
-                                 │   macOS: osascript or Quartz │
-                                 │   Logs JSONL per action      │
-                                 └──────────────────────────────┘
+> NVIDIA Cosmos Cookoff 2026 Submission
 
-                                 │  only for ambiguous cases
-                                 │  POST /verify
-                                 │  { proposed_intent, frames[], landmark_summary, event_id }
-                                 v
-                 ┌──────────────────────────────────────────────┐
-                 │           Cosmos Verifier (PY)               │
-                 │   FastAPI on DGX Spark                       │
-                 │   Validates strict JSON schema               │
-                 │   Logs JSONL per verification                │
-                 └───────────────┬──────────────────────────────┘
-                                 │
-                                 │  OpenAI compatible HTTP call
-                                 │  /v1/chat/completions
-                                 v
-                 ┌──────────────────────────────────────────────┐
-                 │      Cosmos Reason 2 NIM (DGX Spark)          │
-                 │   Model inference service                     │
-                 │   Returns strict JSON: intentional or not     │
-                 └──────────────────────────────────────────────┘
+## The Problem
+
+Gesture-based computer interaction has a fundamental unsolved problem: **false positives from incidental motion.**
+
+On a touchscreen, physical contact IS the intent signal. But in webcam-based spatial tracking, the system watches your hands continuously — and a head scratch looks identical to a swipe, a conversational wave triggers workspace switches, reaching for your coffee fires a pull gesture.
+
+Traditional approaches attack this with geometric constraints: velocity thresholds, activation zones, displacement guards, cooldown timers. These help incrementally, but hit a ceiling because **many intentional commands and incidental motions are kinematically identical.** A deliberate swipe and a conversational hand wave have the same trajectory and velocity profile. The difference isn't in the motion — it's in the *context and intent* behind it.
+
+## The Solution: Cosmos Reason 2 as Intent Verifier
+
+Instead of engineering increasingly complex geometric rules, we use **NVIDIA Cosmos Reason 2** — a vision-language model — to reason about whether a detected gesture was intentional.
+
+The architecture follows the **Event Reviewer pattern:**
+
+1. **Fast local perception** — MediaPipe Hands in the browser detects hand landmarks at 30+ fps and classifies gesture candidates using a state machine
+2. **Intelligent verification** — Ambiguous cases are sent to Cosmos Reason 2 with a short evidence clip (~8–12 frames). Cosmos sees the full visual context: body posture, gaze direction, scene, whether the motion is purposeful or casual
+3. **Action execution** — Only verified intentional commands trigger OS actions (workspace switching, Mission Control)
+
+Cosmos earns its role by solving what heuristics fundamentally cannot: distinguishing a deliberate lateral swipe from someone scratching their head, catching a fly, or waving during conversation.
+
+## Architecture
+
+```
+┌───────────────────────────────────────────────┐
+│               Web App (JS, :5173)             │
+│  MediaPipe Hands · Gesture state machine      │
+│  Ring buffer · Confidence scoring · Overlay   │
+└──────────────┬────────────────────────────────┘
+               │
+     ┌─────────┴──────────┐
+     │                    │
+     v                    v
+┌──────────────┐   ┌───────────────────────┐
+│ Executor     │   │ Cosmos Verifier       │
+│ (PY, :8787)  │   │ (PY, :8788)           │
+│ xdotool /    │   │ Calls Cosmos Reason 2 │
+│ osascript    │   │ NIM on DGX Spark      │
+└──────────────┘   └───────────────────────┘
 ```
 
-## Runtime Flow Diagram
-```text
-Proposal Created (event_id)
-        |
-        v
-Safe Mode?
-  | yes                          | no
-  v                              v
-Call /verify                 Call /execute
-  |                              |
-  | timeout                      |
-  v                              v
-Stop, log verifier_timeout      Execute
-  |
-  | response
-  v
-intentional && final_intent != NONE ?
-  | yes                          | no
-  v                              v
-Call /execute                   Stop, log verifier_reject
-```
+**Decision flow:** High-confidence gestures execute directly. Ambiguous cases go to Cosmos first. Low-confidence signals are ignored. See [Architecture Diagrams](docs/ARCHITECTURE_DIAGRAMS.md) for full details.
 
-## What this repo contains
-- Browser app (`web/`) with MediaPipe Hands overlay and keyboard-triggered gesture proposal stubs.
-- Verifier service (`verifier/`) that returns strict schema-valid JSON (Cosmos verifier stub for now).
-- Executor service (`executor/`) that maps verified intents to OS key actions using `actions.yaml`.
-- Shared strict JSON schema (`shared/schema.json`).
-- Architecture, prompt/schema, latency, and risk docs in `docs/`.
-- Verifier currently uses stub logic, but the target architecture includes the Cosmos Reason 2 NIM `/v1/chat/completions` verification call path.
+## Gestures
 
-## Docs index
-- `docs/PROJECT_CONTEXT.md`
-- `docs/SYSTEM_ARCHITECTURE.md`
-- [`docs/ARCHITECTURE_DIAGRAMS.md`](docs/ARCHITECTURE_DIAGRAMS.md)
-- `docs/COSMOS_PROMPT_AND_SCHEMA.md`
-- `docs/LATENCY_AND_AMBIGUOUS_POLICY.md`
-- `docs/OPTION2_RISKS_AND_MITIGATIONS.md`
+| Intent | Gesture | Action (Linux / macOS) |
+|--------|---------|------------------------|
+| `OPEN_MENU` | Open palm, five fingers spread, held ~0.3s | Super key / Ctrl+Up (Mission Control) |
+| `CLOSE_MENU` | Open palm → closed fist transition | Escape |
+| `SWITCH_RIGHT` | Right hand swipes right→left | Ctrl+Right / Ctrl+Right |
+| `SWITCH_LEFT` | Left hand swipes left→right | Ctrl+Left / Ctrl+Left |
 
-`docs/ARCHITECTURE_DIAGRAMS.md` includes the Cosmos-aware runtime decision flow and deployment modes; current verifier runtime remains stubbed while preserving the Cosmos Reason 2 NIM call architecture.
+## Why Cosmos Is Necessary (Not Optional)
 
-## Run locally
-Open three terminals from repo root.
+We demonstrate Cosmos's value with **8 hard negative scenarios** — motions that a landmark-based detector proposes as gestures, but Cosmos correctly rejects:
 
-1. Start executor (port `8787`)
+| Category | Scenario | Why heuristics fail |
+|----------|----------|---------------------|
+| Self-grooming | Scratch head, scratch nose, rub eye | Same hand trajectory as a swipe |
+| Reaching | Wipe monitor, reach to side, catch a fly | Same displacement and velocity |
+| Conversation | Wave while talking, receive item from someone | Same hand shape and motion |
+
+**Key metric:** False positive rate on hard negatives — baseline (local only) vs. with Cosmos verification.
+
+## Quick Start
+
+Three terminals from repo root:
+
 ```bash
-./scripts/run_executor.sh
+./scripts/run_executor.sh   # Port 8787 — OS key injection
+./scripts/run_verifier.sh   # Port 8788 — Cosmos verification (stub for now)
+./scripts/run_web.sh        # Port 5173 — open in browser
 ```
 
-2. Start verifier (port `8788`)
-```bash
-./scripts/run_verifier.sh
-```
+Open `http://127.0.0.1:5173`, allow webcam access. Press keys `1`–`4` to test intent proposals. Toggle **Safe Mode** to route through the verifier.
 
-3. Start web app (port `5173`)
-```bash
-./scripts/run_web.sh
-```
+### Platform requirements
 
-4. Open browser
-- Visit `http://127.0.0.1:5173`
-- Allow webcam access.
-- Press keys `1`..`4` to generate test proposals:
-  - `1` OPEN_MENU
-  - `2` CLOSE_MENU
-  - `3` SWITCH_RIGHT
-  - `4` SWITCH_LEFT
-- Toggle **Safe Mode** ON to route proposal through verifier first.
+**Linux (DGX Spark / Ubuntu):**
+- GNOME X11 desktop
+- `sudo apt install xdotool`
 
-## Platform notes
-- Linux target: GNOME X11 with `xdotool` installed.
-- macOS target: uses `osascript` + System Events for key injection.
-  - Required: enable **Accessibility** permission for Terminal or your Python interpreter in macOS Settings.
+**macOS:**
+- Enable Accessibility permission for Terminal: System Settings → Privacy & Security → Accessibility
+- Uses `osascript` for key injection
 
-## Acceptance test curls
-Executor health:
-```bash
-curl -s http://127.0.0.1:8787/health
-```
+## Hardware
 
-Executor execute (dry run):
-```bash
-curl -s -X POST http://127.0.0.1:8787/execute \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "intent":"OPEN_MENU",
-    "event_id":"evt-readme-001",
-    "dry_run":true,
-    "source":"curl_test"
-  }'
-```
+- **DGX Spark** (Grace Blackwell GB10, 128GB unified, Ubuntu 24.04 arm64) — Cosmos inference
+- **MacBook Air** (Apple Silicon) — development and secondary demo platform
+- USB webcam on DGX Spark; built-in camera on Mac
 
-Verifier health:
-```bash
-curl -s http://127.0.0.1:8788/health
-```
+## Stretch Goal: Teacher-Student Feedback Loop
 
-Verifier verify:
-```bash
-curl -s -X POST http://127.0.0.1:8788/verify \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "event_id":"evt-readme-verify-001",
-    "proposed_intent":"SWITCH_RIGHT",
-    "local_confidence":0.73
-  }'
-```
+The system logs every proposal, verification, and execution as structured JSONL. This enables a continuous improvement loop where Cosmos acts as a **teacher** labeling ambiguous cases, and a lightweight local **student** classifier trains on those labels to improve over time — gradually reducing Cosmos calls while maintaining accuracy.
 
-Verifier forced reject test:
-```bash
-curl -s -X POST 'http://127.0.0.1:8788/verify?force_reject=true' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "event_id":"evt-readme-verify-002",
-    "proposed_intent":"SWITCH_RIGHT"
-  }'
-```
+See [Option 2 Design & Risks](docs/OPTION2_RISKS_AND_MITIGATIONS.md) for the full design, failure modes, and safeguards.
 
-Responses include `event_id` and verifier responses validate against `shared/schema.json`.
+## Beyond Desktop Gestures
+
+Desktop gesture control is a proof of concept. The core architecture — **VLM-based intent verification on top of continuous spatial tracking** — applies to any domain where false positives from incidental motion are the bottleneck:
+
+- Robotics safety (command vs. normal worker motion)
+- Automotive gesture controls (driver commands vs. passenger conversation)
+- Smart home / IoT (control gestures vs. stretching)
+- AR/VR spatial input (commands vs. natural hand motion)
+- Industrial operations and retail kiosks
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [Project Context](docs/PROJECT_CONTEXT.md) | Problem statement, solution thesis, competition framing |
+| [System Architecture](docs/SYSTEM_ARCHITECTURE.md) | Components, APIs, deployment modes, data flow |
+| [Gesture Detection](docs/GESTURE_DETECTION.md) | Detection algorithm, thresholds, state machines |
+| [Cosmos Prompt & Schema](docs/COSMOS_PROMPT_AND_SCHEMA.md) | Prompt template, JSON schema, integration guide |
+| [Latency Policy](docs/LATENCY_AND_AMBIGUOUS_POLICY.md) | Timeout, merge/supersede, instrumentation |
+| [Option 2 Risks](docs/OPTION2_RISKS_AND_MITIGATIONS.md) | Teacher-student loop design and safeguards |
+| [Architecture Diagrams](docs/ARCHITECTURE_DIAGRAMS.md) | Visual diagrams for all system flows |
+| [Build Status](docs/STATUS.md) | Current state, priorities, session handoff |
+
+## License
+
+Apache 2.0

@@ -1,4 +1,14 @@
-# LATENCY_AND_AMBIGUOUS_POLICY
+# Latency and Ambiguous Case Policy
+
+## Critical dependency: Cosmos Reason 2 latency on DGX Spark
+
+The entire demo architecture depends on how fast Cosmos responds. This has NOT been measured yet.
+
+- **If < 300ms round-trip:** Live gating is viable for every ambiguous case. The user feels a slight delay but it's acceptable for "medium confidence" gestures.
+- **If 300–500ms:** Live gating works but only for the ambiguous band. High-confidence gestures must execute directly.
+- **If > 500ms:** Live gating feels sluggish. Lean toward executing locally and using Cosmos for offline evaluation/labeling only. The demo story shifts from "Cosmos gates actions" to "Cosmos improves the system over time."
+
+**First priority when DGX Spark is available:** Run Cosmos Reason 2 NIM, send a test request with 8 base64 frames, and measure latency. This determines the demo architecture.
 
 ## Policy modes
 
