@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cosmos-gesture-executor"
+version = "0.1.0"
+description = "OS key executor service for cosmos-gesture-agent"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "PyYAML>=6.0.1"
+]
+
+[tool.setuptools]
+packages = ["executor"]

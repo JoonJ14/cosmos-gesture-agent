@@ -1,0 +1,56 @@
+const EXECUTOR_BASE_URL = "http://127.0.0.1:8787";
+const VERIFIER_BASE_URL = "http://127.0.0.1:8788";
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function callVerifier(payload, timeoutMs = 800) {
+  const url = new URL("/verify", VERIFIER_BASE_URL);
+  if (payload.force_reject === true) {
+    url.searchParams.set("force_reject", "true");
+  }
+
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    timeoutMs,
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Verifier request failed (${response.status}): ${body}`);
+  }
+
+  return response.json();
+}
+
+export async function callExecutor(payload) {
+  const url = new URL("/execute", EXECUTOR_BASE_URL);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Executor request failed (${response.status}): ${body}`);
+  }
+
+  return response.json();
+}

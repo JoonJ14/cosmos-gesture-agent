@@ -1,0 +1,143 @@
+import json
+import time
+from pathlib import Path
+from typing import Any, Literal
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from .schema_validate import validate_response
+from .stub_logic import build_stub_response
+
+Intent = Literal["OPEN_MENU", "CLOSE_MENU", "SWITCH_RIGHT", "SWITCH_LEFT"]
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+VERIFIER_LOG_PATH = REPO_ROOT / "verifier" / "logs" / "verifier_events.jsonl"
+
+app = FastAPI(title="Cosmos Gesture Verifier", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class VerifyRequest(BaseModel):
+    event_id: str
+    proposed_intent: Intent
+    frames: list[str] | None = None
+    landmark_summary_json: dict[str, Any] | None = None
+    local_confidence: float | None = None
+    force_reject: bool = False
+    policy_hint: str | None = None
+
+
+class VerifyResponse(BaseModel):
+    version: Literal["1.0"]
+    proposed_intent: Intent
+    final_intent: Literal["OPEN_MENU", "CLOSE_MENU", "SWITCH_RIGHT", "SWITCH_LEFT", "NONE"]
+    intentional: bool
+    confidence: float
+    reason_category: Literal[
+        "intentional_command",
+        "self_grooming",
+        "reaching_object",
+        "swatting_insect",
+        "conversation_gesture",
+        "accidental_motion",
+        "tracking_error",
+        "unknown",
+    ]
+    rationale: str
+
+def append_jsonl(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=True) + "\n")
+        f.flush()
+
+
+@app.on_event("startup")
+def _ensure_verifier_log_dir() -> None:
+    VERIFIER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/verify", response_model=VerifyResponse)
+def verify(req: VerifyRequest, force_reject: bool = Query(default=False)) -> VerifyResponse:
+    started = time.perf_counter()
+    ts_request_received_unix = time.time()
+    log_written = False
+
+    combined_force_reject = force_reject or req.force_reject
+
+    try:
+        response_json = build_stub_response(
+            event_id=req.event_id,
+            proposed_intent=req.proposed_intent,
+            force_reject=combined_force_reject,
+        )
+
+        schema_valid, schema_error = validate_response(response_json)
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        log_record = {
+            "event_id": req.event_id,
+            "ts_request_received_unix": ts_request_received_unix,
+            "proposed_intent": req.proposed_intent,
+            "nim_called": False,
+            "latency_ms": latency_ms,
+            "response_json": response_json,
+            "schema_valid": schema_valid,
+            **({"policy_hint": req.policy_hint} if req.policy_hint else {}),
+            **({"error": schema_error} if schema_error else {}),
+        }
+        append_jsonl(VERIFIER_LOG_PATH, log_record)
+        log_written = True
+
+        if not schema_valid:
+            raise HTTPException(status_code=500, detail=f"Schema validation failed: {schema_error}")
+
+        return VerifyResponse(**response_json)
+
+    except HTTPException as exc:
+        if not log_written:
+            latency_ms = round((time.perf_counter() - started) * 1000, 3)
+            append_jsonl(
+                VERIFIER_LOG_PATH,
+                {
+                    "event_id": req.event_id,
+                    "ts_request_received_unix": ts_request_received_unix,
+                    "proposed_intent": req.proposed_intent,
+                    "nim_called": False,
+                    "latency_ms": latency_ms,
+                    "response_json": None,
+                    "schema_valid": False,
+                    **({"policy_hint": req.policy_hint} if req.policy_hint else {}),
+                    "error": exc.detail if hasattr(exc, "detail") else str(exc),
+                },
+            )
+        raise
+    except Exception as exc:
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        append_jsonl(
+            VERIFIER_LOG_PATH,
+            {
+                "event_id": req.event_id,
+                "ts_request_received_unix": ts_request_received_unix,
+                "proposed_intent": req.proposed_intent,
+                "nim_called": False,
+                "latency_ms": latency_ms,
+                "response_json": None,
+                "schema_valid": False,
+                **({"policy_hint": req.policy_hint} if req.policy_hint else {}),
+                "error": str(exc),
+            }
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

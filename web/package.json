@@ -1,0 +1,9 @@
+{
+  "name": "cosmos-gesture-agent-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "python3 -m http.server 5173 --directory src",
+    "start": "npm run dev"
+  }
+}

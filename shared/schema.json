@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CosmosGestureVerificationResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "proposed_intent",
+    "final_intent",
+    "intentional",
+    "confidence",
+    "reason_category",
+    "rationale"
+  ],
+  "properties": {
+    "version": {
+      "const": "1.0"
+    },
+    "proposed_intent": {
+      "type": "string",
+      "enum": [
+        "OPEN_MENU",
+        "CLOSE_MENU",
+        "SWITCH_RIGHT",
+        "SWITCH_LEFT"
+      ]
+    },
+    "final_intent": {
+      "type": "string",
+      "enum": [
+        "OPEN_MENU",
+        "CLOSE_MENU",
+        "SWITCH_RIGHT",
+        "SWITCH_LEFT",
+        "NONE"
+      ]
+    },
+    "intentional": {
+      "type": "boolean"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reason_category": {
+      "type": "string",
+      "enum": [
+        "intentional_command",
+        "self_grooming",
+        "reaching_object",
+        "swatting_insect",
+        "conversation_gesture",
+        "accidental_motion",
+        "tracking_error",
+        "unknown"
+      ]
+    },
+    "rationale": {
+      "type": "string"
+    }
+  }
+}

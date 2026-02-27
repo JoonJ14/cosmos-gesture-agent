@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+
+# Node
+node_modules/
+
+# Logs (keep dirs, ignore content)
+*.log
+logs/*.log
+executor/logs/*.jsonl
+verifier/logs/*.jsonl
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# Captured frame data
+data/*
+!data/.gitkeep
+
+# OS
+.DS_Store
+
+# Claude Code local settings
+.claude/
+CLAUDE.md

@@ -1,0 +1,11 @@
+linux:
+  OPEN_MENU: Super_L
+  CLOSE_MENU: Escape
+  SWITCH_RIGHT: ctrl+Right
+  SWITCH_LEFT: ctrl+Left
+
+macos:
+  OPEN_MENU: ctrl+Up
+  CLOSE_MENU: Escape
+  SWITCH_RIGHT: ctrl+Right
+  SWITCH_LEFT: ctrl+Left

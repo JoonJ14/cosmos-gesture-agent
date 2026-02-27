@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cosmos Gesture Agent</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --card: #111827;
+        --fg: #e5e7eb;
+        --accent: #22c55e;
+        --muted: #94a3b8;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: radial-gradient(circle at top, #1f2937, var(--bg));
+        color: var(--fg);
+        font-family: "Segoe UI", Tahoma, sans-serif;
+      }
+
+      .app {
+        max-width: 1040px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+
+      .panel {
+        background: color-mix(in srgb, var(--card) 92%, black 8%);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 12px;
+      }
+
+      .controls {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .controls-row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      label {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      input[type="number"] {
+        width: 96px;
+        background: #0b1220;
+        color: var(--fg);
+        border: 1px solid #334155;
+        border-radius: 6px;
+        padding: 6px;
+      }
+
+      .video-shell {
+        position: relative;
+        width: 100%;
+        max-width: 960px;
+        margin: 0 auto;
+        aspect-ratio: 16 / 9;
+        background: #020617;
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      #video,
+      #overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .status {
+        margin-top: 10px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .hint {
+        margin-top: 8px;
+        font-size: 13px;
+        color: #cbd5e1;
+      }
+
+      .ok {
+        color: var(--accent);
+      }
+
+      .warn {
+        color: #f59e0b;
+      }
+
+      .bad {
+        color: #ef4444;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel controls">
+        <div class="controls-row">
+          <label>
+            <input id="safeModeToggle" type="checkbox" checked />
+            Safe Mode (verify before execute)
+          </label>
+          <label>
+            Verifier timeout (ms)
+            <input id="verifierTimeoutMs" type="number" min="50" step="50" value="800" />
+          </label>
+        </div>
+        <div class="hint">
+          Test keys: 1=OPEN_MENU, 2=CLOSE_MENU, 3=SWITCH_RIGHT, 4=SWITCH_LEFT
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="video-shell">
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="overlay"></canvas>
+        </div>
+        <div id="status" class="status">Initializing webcam and hand tracking...</div>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
