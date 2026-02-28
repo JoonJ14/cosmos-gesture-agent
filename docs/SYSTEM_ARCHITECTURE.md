@@ -122,25 +122,52 @@ Response (must validate against `shared/schema.json`):
 
 ## Runtime decision logic
 
-The web app applies a confidence-gated routing policy:
+Cosmos Reason 2 latency on DGX Spark GB10 is **5.8–8.4s** per verification call
+(measured 2026-02-27, see `data/cosmos_latency_tests.md`). This rules out synchronous
+verification in the live gesture path. The default mode is async verification.
+
+### Default mode: async verification
 
 ```
 Gesture detected → local_confidence computed
     │
-    ├── confidence ≥ HIGH threshold → Execute immediately (fast mode)
+    ├── confidence ≥ HIGH threshold → Execute immediately
+    │       → Queue async Cosmos verification (fire-and-forget)
+    │       → When Cosmos responds (~7s later): log result, flag disagreements
     │
-    ├── LOW < confidence < HIGH     → Call Cosmos verifier
-    │       │
-    │       ├── Cosmos approves (intentional=true, final_intent≠NONE) → Execute
-    │       ├── Cosmos rejects  → Do NOT execute, log rejection
-    │       └── Cosmos timeout  → Do NOT execute, log timeout
+    ├── MEDIUM ≤ confidence < HIGH  → Execute immediately
+    │       → Queue async Cosmos verification
+    │       → When Cosmos responds: log result, flag disagreements
     │
-    └── confidence ≤ LOW threshold  → Ignore (do not propose, do not call Cosmos)
+    └── confidence < LOW threshold  → Ignore (no execution, no Cosmos call)
+
+Async verification (background, non-blocking):
+    → POST frames + landmarks to verifier → Cosmos NIM
+    → Log JSONL: intentional, final_intent, reason_category, rationale, latency_ms
+    → If Cosmos disagrees with local execution → record as disagreement
+    → Disagreements = training signal for Option 2 teacher-student loop
 ```
 
-**Current implementation:** Safe Mode toggle (ON = always verify, OFF = always execute directly). Three-tier routing is designed but not yet in code — it replaces Safe Mode once real confidence scores are available.
+### Safe Mode: synchronous verification (demo only)
 
-**Timeout policy:** If verifier does not respond within the configured timeout (default 800ms), the gesture is NOT executed. This prevents late verification from causing stale actions. See `docs/LATENCY_AND_AMBIGUOUS_POLICY.md` for details.
+Safe Mode blocks execution until Cosmos responds (~7s). It exists to show Cosmos
+reasoning in real time during demos — the rationale appears before the desktop action
+fires. Not suitable for normal use. Toggle via the Safe Mode checkbox in the web UI.
+
+```
+Gesture detected → local_confidence ≥ LOW
+    → Call Cosmos verifier (BLOCKS on response)
+    │
+    ├── Cosmos approves (intentional=true, final_intent≠NONE) → Execute
+    ├── Cosmos rejects                                        → Do NOT execute, log rejection
+    └── Cosmos timeout (default 15s)                         → Do NOT execute, log timeout
+```
+
+**Discrimination accuracy (measured):** 3/3 correct on intentional swipe (ACCEPT),
+head scratch (REJECT), and conversation wave (REJECT). Schema-valid output on all runs.
+
+See `docs/LATENCY_AND_AMBIGUOUS_POLICY.md` for the full policy specification including
+merge/supersede rules, stale response handling, and instrumentation fields.
 
 ## Data flow to the verifier
 
