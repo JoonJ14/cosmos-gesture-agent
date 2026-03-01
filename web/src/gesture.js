@@ -7,10 +7,11 @@ const LM_RING_MCP   = 13; const LM_RING_TIP   = 16;
 const LM_PINKY_MCP  = 17; const LM_PINKY_TIP  = 20;
 
 // ─── Detection thresholds (spec: docs/GESTURE_DETECTION.md) ──────────────────
-const SWIPE_THRESHOLD  = 0.30;  // 30% of normalised frame width
-const SWIPE_MIN_MS     = 400;
-const SWIPE_MAX_MS     = 900;
-const PALM_HOLD_MS     = 300;   // stable hold duration for OPEN_MENU
+const SWIPE_MIN_DISPLACEMENT = 0.20; // fraction of frame width (min x-displacement)
+const SWIPE_MIN_DURATION     = 0.25; // seconds (min swipe duration)
+const SWIPE_MAX_DURATION     = 1.2;  // seconds (max swipe duration)
+const PALM_HOLD_MS     = 300;   // stable hold duration for OPEN_MENU (palm phase)
+const FIST_HOLD_MS     = 150;   // min fist hold before palm transition counts (OPEN_MENU)
 const PALM_STABILITY   = 0.05;  // max wrist movement during hold
 const CLOSE_MIN_MS     = 300;
 const CLOSE_MAX_MS     = 800;
@@ -56,10 +57,10 @@ function getHandSpan(lms) {
 function r2(v) { return Math.round(v * 100) / 100; }
 
 function swipeConfidence(mpConf, displacement, elapsed, fingerCount, handSpan) {
-  // Displacement margin: how far past the 30% threshold the swipe went
-  const dispMargin = Math.min(1, Math.max(0, (displacement - SWIPE_THRESHOLD) / SWIPE_THRESHOLD));
-  // Temporal fit: ideal center of [0.4s, 0.9s] window = 0.65s
-  const temporal   = Math.max(0, 1 - Math.abs(elapsed - 0.65) / 0.25);
+  // Displacement margin: how far past the 20% threshold the swipe went
+  const dispMargin = Math.min(1, Math.max(0, (displacement - SWIPE_MIN_DISPLACEMENT) / SWIPE_MIN_DISPLACEMENT));
+  // Temporal fit: ideal center of [0.25s, 1.2s] window = 0.725s, half-width = 0.475s
+  const temporal   = Math.max(0, 1 - Math.abs(elapsed - 0.725) / 0.475);
   // Pose stability: prefer extended fingers (flat hand vs fist)
   const stability  = Math.min(1, fingerCount / 4);
   const size       = Math.min(1, Math.max(0, (handSpan - MIN_HAND_SPAN) / 0.35));
@@ -99,7 +100,7 @@ function makeHandState() {
     frames:   0,       // consecutive frames this hand has been tracked
     accepted: false,   // true once frames >= REQUIRED_FRAMES
     swipe: { state: "IDLE", startX: null, startTs: null, trajX: [] },
-    palm:  { state: "IDLE", startTs: null, startWX: null, openCount: 0 },
+    palm:  { state: "IDLE", fistStartTs: null, palmStartTs: null, startWX: null, openCount: 0 },
     close: { state: "IDLE", startTs: null, openCount: 0, openFingers: 0 },
   };
 }
@@ -108,7 +109,7 @@ function resetHandState(hs) {
   hs.frames   = 0;
   hs.accepted = false;
   hs.swipe = { state: "IDLE", startX: null, startTs: null, trajX: [] };
-  hs.palm  = { state: "IDLE", startTs: null, startWX: null, openCount: 0 };
+  hs.palm  = { state: "IDLE", fistStartTs: null, palmStartTs: null, startWX: null, openCount: 0 };
   hs.close = { state: "IDLE", startTs: null, openCount: 0, openFingers: 0 };
 }
 
@@ -117,9 +118,14 @@ let lastProposalTs = -Infinity;
 
 // ─── Swipe (SWITCH_RIGHT / SWITCH_LEFT) ──────────────────────────────────────
 //
-// SWITCH_RIGHT: right hand, wrist x decreases ≥30% (hand moves right→left in
-//               camera view, which corresponds to the user swiping right).
-// SWITCH_LEFT:  left hand,  wrist x increases ≥30%.
+// Selfie/mirror coordinate note: MediaPipe returns raw camera-frame coordinates
+// where x=0 is the LEFT edge of the sensor. Because the user faces the camera,
+// their right hand sits at low x values (camera's left). A physical rightward
+// swipe (right hand moving toward the user's left) therefore INCREASES x in the
+// raw camera frame.
+//
+// SWITCH_RIGHT: right hand, wrist x INCREASES ≥20% (user swipes right hand left).
+// SWITCH_LEFT:  left hand,  wrist x DECREASES ≥20% (user swipes left hand right).
 //
 // State: IDLE → TRACKING → (proposal emitted) → IDLE
 //
@@ -142,16 +148,18 @@ function updateSwipe(side, hs, lms, mpConf, now) {
   if (sw.state === "TRACKING") {
     sw.trajX.push(wX);
     const elapsed      = (now - sw.startTs) / 1000;
-    const displacement = side === "Right" ? sw.startX - wX   // x decreases
-                                          : wX - sw.startX;  // x increases
+    // Mirror correction: physical rightward swipe → x INCREASES for right hand;
+    //                    physical leftward swipe  → x DECREASES for left hand.
+    const displacement = side === "Right" ? wX - sw.startX   // x increases
+                                          : sw.startX - wX;  // x decreases
 
-    if (elapsed > SWIPE_MAX_MS / 1000) {
+    if (elapsed > SWIPE_MAX_DURATION) {
       // Time window exceeded — reset for next attempt
       sw.state = "IDLE";
       return null;
     }
 
-    if (displacement >= SWIPE_THRESHOLD && elapsed >= SWIPE_MIN_MS / 1000) {
+    if (displacement >= SWIPE_MIN_DISPLACEMENT && elapsed >= SWIPE_MIN_DURATION) {
       const intent = side === "Right" ? "SWITCH_RIGHT" : "SWITCH_LEFT";
       const conf   = swipeConfidence(mpConf, displacement, elapsed, fingers, span);
       sw.state = "IDLE";
@@ -174,8 +182,14 @@ function updateSwipe(side, hs, lms, mpConf, now) {
 
 // ─── Palm hold (OPEN_MENU) ────────────────────────────────────────────────────
 //
-// Detect ≥4 fingers extended + palm facing camera, held stable for ≥0.3s.
-// State: IDLE → PALM_DETECTED → HOLDING → (proposal emitted) → IDLE
+// Requires a deliberate fist→palm transition to avoid false triggers from
+// resting an open hand or casual gestures during conversation.
+//
+// State: IDLE → FIST_DETECTED → PALM_OPENED → (proposal emitted) → IDLE
+//
+//   IDLE:          Wait for a closed fist (≤1 finger extended).
+//   FIST_DETECTED: Hold fist ≥FIST_HOLD_MS, then open hand to trigger next phase.
+//   PALM_OPENED:   Open palm held stable for ≥PALM_HOLD_MS → emit OPEN_MENU.
 //
 function updatePalm(side, hs, lms, mpConf, now) {
   const p       = hs.palm;
@@ -184,24 +198,42 @@ function updatePalm(side, hs, lms, mpConf, now) {
   const span    = getHandSpan(lms);
   const wX      = lms[LM_WRIST].x;
   const isOpen  = fingers >= 4 && facing;
+  const isFist  = fingers <= 1;
 
   if (p.state === "IDLE") {
-    if (isOpen) {
-      p.startTs   = now;
-      p.startWX   = wX;
-      p.openCount = 1;
-      p.state     = "PALM_DETECTED";
+    if (isFist) {
+      p.fistStartTs = now;
+      p.state       = "FIST_DETECTED";
     }
     return null;
   }
 
-  if (p.state === "PALM_DETECTED" || p.state === "HOLDING") {
+  if (p.state === "FIST_DETECTED") {
+    const fistElapsed = (now - p.fistStartTs) / 1000;
+    if (isFist) {
+      // Still holding fist — keep waiting
+      return null;
+    }
+    if (isOpen && fistElapsed >= FIST_HOLD_MS / 1000) {
+      // Fist was held long enough, and the hand just opened → start palm phase
+      p.palmStartTs = now;
+      p.startWX     = wX;
+      p.openCount   = 1;
+      p.state       = "PALM_OPENED";
+    } else {
+      // Ambiguous hand pose, or fist wasn't held long enough → reset
+      p.state = "IDLE";
+    }
+    return null;
+  }
+
+  if (p.state === "PALM_OPENED") {
     if (!isOpen) {
       p.state = "IDLE";
       return null;
     }
     p.openCount++;
-    const elapsed    = (now - p.startTs) / 1000;
+    const elapsed    = (now - p.palmStartTs) / 1000;
     const wristDelta = Math.abs(wX - p.startWX);
 
     if (wristDelta > PALM_STABILITY) {
@@ -209,8 +241,6 @@ function updatePalm(side, hs, lms, mpConf, now) {
       p.state = "IDLE";
       return null;
     }
-
-    if (p.state === "PALM_DETECTED") p.state = "HOLDING";
 
     if (elapsed >= PALM_HOLD_MS / 1000) {
       const conf = palmConfidence(mpConf, fingers, elapsed, wristDelta, span);
@@ -411,9 +441,20 @@ export function proposeGestureFromLandmarks(results) {
     // Swipe: fastest & highest priority (purely temporal).
     // Close: requires open-palm precondition (medium priority).
     // Palm hold: slowest — only fires if swipe/close didn't.
+    //
+    // Mutual exclusion (Bug 3): while CLOSE_MENU is tracking its open-palm phase
+    // (OPEN_SEEN), OPEN_MENU must not fire — the same palm would double-trigger.
+    // Reset the palm state machine and skip it for this frame so CLOSE_MENU wins.
+    const closeIsTracking = hs.close.state === "OPEN_SEEN";
+    if (closeIsTracking) {
+      hs.palm.state       = "IDLE";
+      hs.palm.fistStartTs = null;
+      hs.palm.palmStartTs = null;
+    }
+
     let proposal = updateSwipe(side, hs, lms, mpConf, now);
     if (!proposal) proposal = updateClose(side, hs, lms, mpConf, now);
-    if (!proposal) proposal = updatePalm(side, hs, lms, mpConf, now);
+    if (!proposal && !closeIsTracking) proposal = updatePalm(side, hs, lms, mpConf, now);
 
     if (proposal) {
       lastProposalTs = now;
