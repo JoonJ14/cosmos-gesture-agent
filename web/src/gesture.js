@@ -9,6 +9,7 @@ const LM_PINKY_MCP  = 17; const LM_PINKY_TIP  = 20;
 // ─── Detection thresholds (spec: docs/GESTURE_DETECTION.md) ──────────────────
 // Intentionally loose for high recall — false positives are filtered by Cosmos.
 const SWIPE_MIN_DISPLACEMENT  = 0.07; // min total (Euclidean) displacement to qualify as a swipe
+const SWIPE_MIN_X_DISPLACEMENT = 0.05; // min absolute x-displacement — prevents hand-raise triggering
 const SWIPE_MIN_DURATION      = 0.05; // seconds (min swipe duration — allows fast snapping swipes)
 const SWIPE_MAX_DURATION      = 2.0;  // seconds (max swipe duration)
 const PALM_HOLD_MS            = 150;  // stable palm hold for OPEN_MENU
@@ -218,9 +219,10 @@ function updateSwipe(side, hs, lms, mpConf, now) {
     const totalDisp = Math.sqrt(dx * dx + dy * dy);
     const screenDir = dx < 0 ? "RIGHT" : "LEFT";
 
+    const absDx = Math.abs(dx);
     console.log(
       `[SWIPE] tracking: ${side},` +
-      ` dx: ${dx.toFixed(3)}, dy: ${dy.toFixed(3)}, total: ${totalDisp.toFixed(3)},` +
+      ` dx: ${dx.toFixed(3)}, absDx: ${absDx.toFixed(3)}, dy: ${dy.toFixed(3)}, total: ${totalDisp.toFixed(3)},` +
       ` screenDir: ${screenDir}, duration: ${elapsed.toFixed(3)}s`,
     );
 
@@ -229,11 +231,13 @@ function updateSwipe(side, hs, lms, mpConf, now) {
       return null;
     }
 
-    // Qualify: total displacement must exceed threshold AND the x-component must
-    // be at least 40% of total displacement (rejects nearly-vertical motions).
-    const hasLateralComponent = totalDisp > 0 && Math.abs(dx) / totalDisp >= 0.40;
+    // Qualify: total displacement must exceed threshold AND absolute x-displacement
+    // must reach its own minimum (prevents hand-raise with slight lateral drift from
+    // triggering) AND the x-component must be at least 40% of total displacement
+    // (rejects nearly-vertical motions).
+    const hasLateralComponent = totalDisp > 0 && absDx / totalDisp >= 0.40;
 
-    if (totalDisp >= SWIPE_MIN_DISPLACEMENT && elapsed >= SWIPE_MIN_DURATION && hasLateralComponent) {
+    if (totalDisp >= SWIPE_MIN_DISPLACEMENT && absDx >= SWIPE_MIN_X_DISPLACEMENT && elapsed >= SWIPE_MIN_DURATION && hasLateralComponent) {
       // Direction from x-component sign (raw x decreasing = screen-right = SWITCH_LEFT)
       const isRight = dx < 0;
       const conf = swipeConfidence(mpConf, totalDisp, elapsed, span);
