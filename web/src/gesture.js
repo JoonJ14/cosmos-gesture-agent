@@ -622,7 +622,7 @@ export function proposeGestureFromLandmarks(results) {
 
     // Suppress swipe when the user is mid-open-menu or mid-close-menu sequence.
     // Any lateral hand motion during those sequences is part of the gesture, not a swipe.
-    const swipeSuppressed = openMenuActive || closeIsTracking;
+    const swipeSuppressed = hs.palm.state === "PALM_OPENED" || hs.close.state === "FIST_SEEN";
     if (swipeSuppressed) {
       console.log("[SWIPE] suppressed — open/close menu active");
       hs.swipe.state = "IDLE";  // reset so swipe doesn't accumulate displacement during suppression
