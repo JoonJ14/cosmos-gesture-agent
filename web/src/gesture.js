@@ -160,14 +160,17 @@ function updateSwipe(side, hs, lms, mpConf, now) {
     }
 
     // With CSS scaleX(-1): raw x decreasing = moving toward screen-right = SWITCH_RIGHT
-    const rightDisp = sw.startX - wX;   // positive when x decreased
-    const leftDisp  = wX - sw.startX;   // positive when x increased
+    // User mental model: swipe rightward on the mirrored screen → go to right workspace.
+    // raw x decreases → screen-right swipe → SWITCH_RIGHT
+    // raw x increases → screen-left  swipe → SWITCH_LEFT
+    const rightDisp = sw.startX - wX;   // positive when x decreased (screen-right)
+    const leftDisp  = wX - sw.startX;   // positive when x increased (screen-left)
 
     if (rightDisp >= SWIPE_MIN_DISPLACEMENT && elapsed >= SWIPE_MIN_DURATION) {
       const conf = swipeConfidence(mpConf, rightDisp, elapsed, span);
       sw.state = "IDLE";
       return {
-        intent: "SWITCH_RIGHT",
+        intent: "SWITCH_LEFT",   // swapped: screen-right swipe = SWITCH_LEFT
         confidence: conf,
         landmarkSummary: {
           handedness:         side,
@@ -184,7 +187,7 @@ function updateSwipe(side, hs, lms, mpConf, now) {
       const conf = swipeConfidence(mpConf, leftDisp, elapsed, span);
       sw.state = "IDLE";
       return {
-        intent: "SWITCH_LEFT",
+        intent: "SWITCH_RIGHT",  // swapped: screen-left swipe = SWITCH_RIGHT
         confidence: conf,
         landmarkSummary: {
           handedness:         side,
@@ -212,6 +215,7 @@ function updateSwipe(side, hs, lms, mpConf, now) {
 //   PALM_OPENED:   Open palm held stable for ≥PALM_HOLD_MS → emit OPEN_MENU.
 //
 function updatePalm(side, hs, lms, mpConf, now) {
+  console.log("[OPEN_MENU] entered updatePalm");
   const p       = hs.palm;
   const fingers = countExtendedFingers(lms);
   const facing  = isPalmFacing(lms);
@@ -299,6 +303,7 @@ function updatePalm(side, hs, lms, mpConf, now) {
 // State: IDLE → OPEN_SEEN → FIST_SEEN → (proposal emitted) → IDLE
 //
 function updateClose(side, hs, lms, mpConf, now) {
+  console.log("[CLOSE_MENU] entered updateClose");
   const c       = hs.close;
   const fingers = countExtendedFingers(lms);
   const facing  = isPalmFacing(lms);
@@ -482,10 +487,17 @@ export function startHandsCameraLoop(videoElement, hands) {
  *   landmarkSummary — structured JSON for the verifier payload
  */
 export function proposeGestureFromLandmarks(results) {
+  // ── Top-level frame trace (always fires, even if no hands / in cooldown) ──
+  console.log(`[GESTURE FRAME] hands detected: ${results.multiHandLandmarks?.length || 0}`);
+
   const now = performance.now();
 
   // Global cooldown — block all proposals for 1.5s after the last one
-  if (now - lastProposalTs < COOLDOWN_MS) return null;
+  const cooldownRemaining = COOLDOWN_MS - (now - lastProposalTs);
+  if (cooldownRemaining > 0) {
+    console.log(`[GESTURE FRAME] in cooldown, ${Math.round(cooldownRemaining)}ms remaining`);
+    return null;
+  }
 
   const hands      = results.multiHandLandmarks || [];
   const handedness = results.multiHandedness    || [];
@@ -494,16 +506,18 @@ export function proposeGestureFromLandmarks(results) {
 
   for (let i = 0; i < hands.length; i++) {
     const h = handedness[i];
-    if (!h) continue;
+    if (!h) { console.log(`[GESTURE FRAME] hand[${i}]: no handedness entry, skipping`); continue; }
     const side   = h.label;                   // "Left" | "Right" per MediaPipe
     const mpConf = h.score ?? 0.5;
     const lms    = hands[i];
 
-    if (side !== "Left" && side !== "Right") continue;
-    if (!lms || lms.length < 21) continue;
+    if (side !== "Left" && side !== "Right") { console.log(`[GESTURE FRAME] hand[${i}]: unknown side "${side}", skipping`); continue; }
+    if (!lms || lms.length < 21) { console.log(`[GESTURE FRAME] hand[${i}]: bad landmarks (len=${lms?.length}), skipping`); continue; }
 
     // Ignore hands that are too small / too far from camera
-    if (getHandSpan(lms) < MIN_HAND_SPAN) {
+    const span = getHandSpan(lms);
+    if (span < MIN_HAND_SPAN) {
+      console.log(`[GESTURE FRAME] hand[${i}] ${side}: span ${span.toFixed(3)} < MIN_HAND_SPAN, skipping`);
       presentSides.add(side);  // still counts as present to prevent state reset
       continue;
     }
@@ -515,22 +529,27 @@ export function proposeGestureFromLandmarks(results) {
     // false triggers when a hand first enters the frame from the side)
     hs.frames++;
     if (hs.frames >= REQUIRED_FRAMES) hs.accepted = true;
-    if (!hs.accepted) continue;
+    if (!hs.accepted) {
+      console.log(`[GESTURE FRAME] hand[${i}] ${side}: entry guard frames=${hs.frames}/${REQUIRED_FRAMES}, not yet accepted`);
+      continue;
+    }
 
     // Run state machines in priority order.
     // Swipe: fastest & highest priority (purely temporal).
     // Close: requires open-palm precondition (medium priority).
     // Palm hold: slowest — only fires if swipe/close didn't.
     //
-    // Mutual exclusion (Bug 3): while CLOSE_MENU is tracking its open-palm phase
-    // (OPEN_SEEN), OPEN_MENU must not fire — the same palm would double-trigger.
-    // Reset the palm state machine and skip it for this frame so CLOSE_MENU wins.
+    // Mutual exclusion: while CLOSE_MENU is tracking (OPEN_SEEN or FIST_SEEN),
+    // suppress OPEN_MENU so the same palm does not double-trigger.
     const closeIsTracking = hs.close.state === "OPEN_SEEN" || hs.close.state === "FIST_SEEN";
     if (closeIsTracking) {
+      console.log(`[GESTURE FRAME] ${side}: closeIsTracking=true (${hs.close.state}), suppressing OPEN_MENU`);
       hs.palm.state       = "IDLE";
       hs.palm.fistStartTs = null;
       hs.palm.palmStartTs = null;
     }
+
+    console.log(`[GESTURE FRAME] ${side}: accepted, swipe=${hs.swipe.state}, close=${hs.close.state}, palm=${hs.palm.state}, closeIsTracking=${closeIsTracking}`);
 
     let proposal = updateSwipe(side, hs, lms, mpConf, now);
     if (!proposal) proposal = updateClose(side, hs, lms, mpConf, now);
