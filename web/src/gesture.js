@@ -8,8 +8,8 @@ const LM_PINKY_MCP  = 17; const LM_PINKY_TIP  = 20;
 
 // ─── Detection thresholds (spec: docs/GESTURE_DETECTION.md) ──────────────────
 // Intentionally loose for high recall — false positives are filtered by Cosmos.
-const SWIPE_MIN_DISPLACEMENT  = 0.10; // fraction of frame width (min x-displacement)
-const SWIPE_MIN_DURATION      = 0.15; // seconds (min swipe duration)
+const SWIPE_MIN_DISPLACEMENT  = 0.07; // min total (Euclidean) displacement to qualify as a swipe
+const SWIPE_MIN_DURATION      = 0.05; // seconds (min swipe duration — allows fast snapping swipes)
 const SWIPE_MAX_DURATION      = 2.0;  // seconds (max swipe duration)
 const PALM_HOLD_MS            = 150;  // stable palm hold for OPEN_MENU
 const FIST_HOLD_MS            = 50;   // min fist hold before palm transition (OPEN_MENU)
@@ -160,7 +160,7 @@ function makeHandState() {
   return {
     frames:   0,       // consecutive frames this hand has been tracked
     accepted: false,   // true once frames >= REQUIRED_FRAMES
-    swipe: { state: "IDLE", startX: null, startTs: null, trajX: [] },
+    swipe: { state: "IDLE", startX: null, startY: null, startTs: null, trajX: [] },
     palm:  { state: "IDLE", fistStartTs: null, palmStartTs: null, startWX: null, openCount: 0 },
     close: { state: "IDLE", startTs: null, palmStartWX: null, openCount: 0, openFingers: 0, fistStartTs: null },
     recentWristPositions: [],   // last 10 {x, y} wrist positions for velocity features
@@ -182,23 +182,28 @@ let lastProposalTs = -Infinity;
 // ─── Swipe (SWITCH_RIGHT / SWITCH_LEFT) ──────────────────────────────────────
 //
 // Pose-agnostic: any hand pose (open, sideways, loose fist) can swipe.
-// Detection is based solely on the wrist landmark (0) x-displacement over time.
-// Either hand can trigger either direction.
+// Threshold is total Euclidean displacement (dx² + dy²)^0.5 so diagonal arcs
+// and curved swipes qualify even if the pure x-component is small.
+// Direction is determined by the x-component: if |dx| ≥ 40% of total
+// displacement the motion has a meaningful lateral component and is classified
+// accordingly. Either hand can trigger either direction.
 //
 // Coordinate system with CSS scaleX(-1) mirror applied to the video element:
 //   screen-right ≡ low raw x  |  screen-left ≡ high raw x
-//   raw x DECREASES → hand moved toward screen-RIGHT → SWITCH_RIGHT
-//   raw x INCREASES → hand moved toward screen-LEFT  → SWITCH_LEFT
+//   raw x DECREASES → hand moved toward screen-RIGHT → SWITCH_LEFT
+//   raw x INCREASES → hand moved toward screen-LEFT  → SWITCH_RIGHT
 //
 // State: IDLE → TRACKING → (proposal emitted) → IDLE
 //
 function updateSwipe(side, hs, lms, mpConf, now) {
   const sw   = hs.swipe;
   const wX   = lms[LM_WRIST].x;
+  const wY   = lms[LM_WRIST].y;
   const span = getHandSpan(lms);
 
   if (sw.state === "IDLE") {
     sw.startX  = wX;
+    sw.startY  = wY;
     sw.startTs = now;
     sw.trajX   = [wX];
     sw.state   = "TRACKING";
@@ -207,12 +212,15 @@ function updateSwipe(side, hs, lms, mpConf, now) {
 
   if (sw.state === "TRACKING") {
     sw.trajX.push(wX);
-    const elapsed   = (now - sw.startTs) / 1000;
-    const rawDelta  = wX - sw.startX;  // positive = x increased = screen-left motion
-    const screenDir = rawDelta < 0 ? "RIGHT" : "LEFT";
+    const elapsed = (now - sw.startTs) / 1000;
+    const dx      = wX - sw.startX;   // positive = screen-left motion
+    const dy      = wY - sw.startY;   // positive = downward motion
+    const totalDisp = Math.sqrt(dx * dx + dy * dy);
+    const screenDir = dx < 0 ? "RIGHT" : "LEFT";
 
     console.log(
-      `[SWIPE] tracking: ${side}, rawDisplacement: ${rawDelta.toFixed(3)},` +
+      `[SWIPE] tracking: ${side},` +
+      ` dx: ${dx.toFixed(3)}, dy: ${dy.toFixed(3)}, total: ${totalDisp.toFixed(3)},` +
       ` screenDir: ${screenDir}, duration: ${elapsed.toFixed(3)}s`,
     );
 
@@ -221,40 +229,22 @@ function updateSwipe(side, hs, lms, mpConf, now) {
       return null;
     }
 
-    // With CSS scaleX(-1): raw x decreasing = moving toward screen-right = SWITCH_RIGHT
-    // User mental model: swipe rightward on the mirrored screen → go to right workspace.
-    // raw x decreases → screen-right swipe → SWITCH_RIGHT
-    // raw x increases → screen-left  swipe → SWITCH_LEFT
-    const rightDisp = sw.startX - wX;   // positive when x decreased (screen-right)
-    const leftDisp  = wX - sw.startX;   // positive when x increased (screen-left)
+    // Qualify: total displacement must exceed threshold AND the x-component must
+    // be at least 40% of total displacement (rejects nearly-vertical motions).
+    const hasLateralComponent = totalDisp > 0 && Math.abs(dx) / totalDisp >= 0.40;
 
-    if (rightDisp >= SWIPE_MIN_DISPLACEMENT && elapsed >= SWIPE_MIN_DURATION) {
-      const conf = swipeConfidence(mpConf, rightDisp, elapsed, span);
+    if (totalDisp >= SWIPE_MIN_DISPLACEMENT && elapsed >= SWIPE_MIN_DURATION && hasLateralComponent) {
+      // Direction from x-component sign (raw x decreasing = screen-right = SWITCH_LEFT)
+      const isRight = dx < 0;
+      const conf = swipeConfidence(mpConf, totalDisp, elapsed, span);
       sw.state = "IDLE";
       return {
-        intent: "SWITCH_LEFT",   // swapped: screen-right swipe = SWITCH_LEFT
+        intent: isRight ? "SWITCH_LEFT" : "SWITCH_RIGHT",
         confidence: conf,
         landmarkSummary: {
           handedness:         side,
           wrist_trajectory_x: [...sw.trajX],
-          displacement_pct:   r2(rightDisp),
-          duration_s:         r2(elapsed),
-          fingers_extended:   countExtendedFingers(lms),
-          palm_facing_camera: isPalmFacing(lms),
-        },
-      };
-    }
-
-    if (leftDisp >= SWIPE_MIN_DISPLACEMENT && elapsed >= SWIPE_MIN_DURATION) {
-      const conf = swipeConfidence(mpConf, leftDisp, elapsed, span);
-      sw.state = "IDLE";
-      return {
-        intent: "SWITCH_RIGHT",  // swapped: screen-left swipe = SWITCH_RIGHT
-        confidence: conf,
-        landmarkSummary: {
-          handedness:         side,
-          wrist_trajectory_x: [...sw.trajX],
-          displacement_pct:   r2(leftDisp),
+          displacement_pct:   r2(totalDisp),
           duration_s:         r2(elapsed),
           fingers_extended:   countExtendedFingers(lms),
           palm_facing_camera: isPalmFacing(lms),
