@@ -17,8 +17,8 @@ const CLOSE_MIN_MS            = 300;  // min palm hold before fist accepted (CLO
 const CLOSE_MAX_MS            = 1000; // total timeout for CLOSE_MENU sequence
 const CLOSE_FIST_HOLD_MS      = 150;  // fist must be held this long to fire CLOSE_MENU
 const CLOSE_PALM_MAX_DRIFT    = 0.06; // max wrist drift during CLOSE_MENU palm phase
-const REQUIRED_FRAMES         = 3;    // consecutive frames before accepting hand
-const MIN_HAND_SPAN           = 0.05; // ignore hands < 5% of frame (too far / small)
+const REQUIRED_FRAMES         = 1;    // consecutive frames before accepting hand (was 3)
+const MIN_HAND_SPAN           = 0.025; // ignore hands < 2.5% of frame width (was 0.05)
 const COOLDOWN_MS             = 1500; // global cooldown after any proposal
 
 // ─── Finger & palm helpers ────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ function updatePalm(side, hs, lms, mpConf, now) {
 //
 // Deliberate palm-to-fist only: incidental hand withdrawal or reaching should
 // not trigger. Requirements:
-//   1. Open palm (≥4 fingers) seen for ≥REQUIRED_FRAMES in IDLE.
+//   1. Open palm (≥4 fingers) seen for ≥REQUIRED_FRAMES frames in IDLE.
 //   2. Palm held still (wrist drift < CLOSE_PALM_MAX_DRIFT) for ≥CLOSE_MIN_MS.
 //   3. Hand closes to fist (≤2 fingers) while still in frame.
 //   4. Fist held for ≥CLOSE_FIST_HOLD_MS before firing.
