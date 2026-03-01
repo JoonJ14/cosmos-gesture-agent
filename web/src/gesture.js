@@ -7,19 +7,19 @@ const LM_RING_MCP   = 13; const LM_RING_TIP   = 16;
 const LM_PINKY_MCP  = 17; const LM_PINKY_TIP  = 20;
 
 // ─── Detection thresholds (spec: docs/GESTURE_DETECTION.md) ──────────────────
-const SWIPE_MIN_DISPLACEMENT  = 0.15; // fraction of frame width (min x-displacement)
-const SWIPE_MIN_DURATION      = 0.20; // seconds (min swipe duration)
-const SWIPE_MAX_DURATION      = 1.5;  // seconds (max swipe duration)
-const PALM_HOLD_MS            = 300;  // stable palm hold for OPEN_MENU
-const FIST_HOLD_MS            = 100;  // min fist hold before palm transition (OPEN_MENU)
+// Intentionally loose for high recall — false positives are filtered by Cosmos.
+const SWIPE_MIN_DISPLACEMENT  = 0.10; // fraction of frame width (min x-displacement)
+const SWIPE_MIN_DURATION      = 0.15; // seconds (min swipe duration)
+const SWIPE_MAX_DURATION      = 2.0;  // seconds (max swipe duration)
+const PALM_HOLD_MS            = 150;  // stable palm hold for OPEN_MENU
+const FIST_HOLD_MS            = 50;   // min fist hold before palm transition (OPEN_MENU)
 const PALM_STABILITY          = 0.05; // max wrist drift during OPEN_MENU palm hold
-const CLOSE_MIN_MS            = 300;  // min palm hold before fist accepted (CLOSE_MENU)
+const CLOSE_MIN_MS            = 150;  // min palm hold before fist accepted (CLOSE_MENU)
 const CLOSE_MAX_MS            = 1000; // total timeout for CLOSE_MENU sequence
-const CLOSE_FIST_HOLD_MS      = 150;  // fist must be held this long to fire CLOSE_MENU
-const CLOSE_PALM_MAX_DRIFT    = 0.06; // max wrist drift during CLOSE_MENU palm phase
-const REQUIRED_FRAMES         = 1;    // consecutive frames before accepting hand (was 3)
-const MIN_HAND_SPAN           = 0.025; // ignore hands < 2.5% of frame width (was 0.05)
-const COOLDOWN_MS             = 1500; // global cooldown after any proposal
+const CLOSE_FIST_HOLD_MS      = 75;   // fist must be held this long to fire CLOSE_MENU
+const REQUIRED_FRAMES         = 1;    // consecutive frames before accepting hand
+const MIN_HAND_SPAN           = 0.015; // ignore hands < 1.5% of frame width
+const COOLDOWN_MS             = 800;  // global cooldown after any proposal
 
 // ─── Finger & palm helpers ────────────────────────────────────────────────────
 
@@ -61,10 +61,10 @@ function r2(v) { return Math.round(v * 100) / 100; }
 // fingerCount removed — swipe detection is pose-agnostic; pose stability weight
 // redistributed to displacement and mpConf.
 function swipeConfidence(mpConf, displacement, elapsed, handSpan) {
-  // Displacement margin: how far past the 15% threshold the swipe went
+  // Displacement margin: how far past the 10% threshold the swipe went
   const dispMargin = Math.min(1, Math.max(0, (displacement - SWIPE_MIN_DISPLACEMENT) / SWIPE_MIN_DISPLACEMENT));
-  // Temporal fit: ideal center of [0.2s, 1.5s] window = 0.85s, half-width = 0.65s
-  const temporal   = Math.max(0, 1 - Math.abs(elapsed - 0.85) / 0.65);
+  // Temporal fit: ideal center of [0.15s, 2.0s] window = 1.075s, half-width = 0.925s
+  const temporal   = Math.max(0, 1 - Math.abs(elapsed - 1.075) / 0.925);
   const size       = Math.min(1, Math.max(0, (handSpan - MIN_HAND_SPAN) / 0.35));
   return r2(0.30 * mpConf + 0.40 * dispMargin + 0.15 * temporal + 0.15 * size);
 }
@@ -210,9 +210,9 @@ function updateSwipe(side, hs, lms, mpConf, now) {
 //
 // State: IDLE → FIST_DETECTED → PALM_OPENED → (proposal emitted) → IDLE
 //
-//   IDLE:          Wait for a closed fist (≤2 fingers extended; thumb may stick out).
+//   IDLE:          Wait for a loosely closed fist (≤3 fingers extended).
 //   FIST_DETECTED: Hold fist ≥FIST_HOLD_MS, then open hand to trigger next phase.
-//   PALM_OPENED:   Open palm held stable for ≥PALM_HOLD_MS → emit OPEN_MENU.
+//   PALM_OPENED:   Partial or full palm held stable for ≥PALM_HOLD_MS → emit OPEN_MENU.
 //
 function updatePalm(side, hs, lms, mpConf, now) {
   console.log("[OPEN_MENU] entered updatePalm");
@@ -221,10 +221,10 @@ function updatePalm(side, hs, lms, mpConf, now) {
   const facing  = isPalmFacing(lms);
   const span    = getHandSpan(lms);
   const wX      = lms[LM_WRIST].x;
-  const isOpen  = fingers >= 4 && facing;
-  // Loosened fist threshold: ≤2 fingers extended allows thumb to stick out,
-  // which MediaPipe frequently misclassifies on a closed fist.
-  const isFist  = fingers <= 2;
+  // Loosened: ≥3 fingers extended (partial palm counts)
+  const isOpen  = fingers >= 3 && facing;
+  // Loosened: ≤3 fingers extended catches loose/relaxed hands, not just tight fists
+  const isFist  = fingers <= 3;
 
   if (p.state === "IDLE") {
     if (isFist) {
@@ -293,11 +293,11 @@ function updatePalm(side, hs, lms, mpConf, now) {
 
 // ─── Palm-to-fist (CLOSE_MENU) ────────────────────────────────────────────────
 //
-// Deliberate palm-to-fist only: incidental hand withdrawal or reaching should
-// not trigger. Requirements:
-//   1. Open palm (≥4 fingers) seen for ≥REQUIRED_FRAMES frames in IDLE.
-//   2. Palm held still (wrist drift < CLOSE_PALM_MAX_DRIFT) for ≥CLOSE_MIN_MS.
-//   3. Hand closes to fist (≤2 fingers) while still in frame.
+// Any visible open-ish palm → fist transition fires, even if the hand is moving.
+// High recall by design — Cosmos filters false positives. Requirements:
+//   1. Partial or full palm (≥3 fingers) seen for ≥REQUIRED_FRAMES frames in IDLE.
+//   2. Palm held for ≥CLOSE_MIN_MS (no stillness check — moving hands are OK).
+//   3. Hand closes to fist (≤3 fingers) while still in frame.
 //   4. Fist held for ≥CLOSE_FIST_HOLD_MS before firing.
 //
 // State: IDLE → OPEN_SEEN → FIST_SEEN → (proposal emitted) → IDLE
@@ -309,8 +309,9 @@ function updateClose(side, hs, lms, mpConf, now) {
   const facing  = isPalmFacing(lms);
   const span    = getHandSpan(lms);
   const wX      = lms[LM_WRIST].x;
-  const isOpen  = fingers >= 4 && facing;
-  const isFist  = fingers <= 2;
+  // Loosened: ≥3 fingers (partial palm) and ≤3 fingers (loose fist)
+  const isOpen  = fingers >= 3 && facing;
+  const isFist  = fingers <= 3;
 
   if (c.state === "IDLE") {
     if (isOpen) {
@@ -342,12 +343,7 @@ function updateClose(side, hs, lms, mpConf, now) {
       ` wristMovement: ${wristMovement.toFixed(3)}, fingersExtended: ${fingers}`,
     );
 
-    // Stillness check: hand must not be moving laterally (catches reaching / phone withdrawal)
-    if (wristMovement > CLOSE_PALM_MAX_DRIFT) {
-      c.state     = "IDLE";
-      c.openCount = 0;
-      return null;
-    }
+    // No stillness check — moving hands are allowed (Cosmos handles false positives)
 
     if (elapsed > CLOSE_MAX_MS / 1000) {
       c.state     = "IDLE";
