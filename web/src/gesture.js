@@ -10,6 +10,7 @@ const LM_PINKY_MCP  = 17; const LM_PINKY_TIP  = 20;
 // Intentionally loose for high recall — false positives are filtered by Cosmos.
 const SWIPE_MIN_DISPLACEMENT  = 0.07; // min total (Euclidean) displacement to qualify as a swipe
 const SWIPE_MIN_X_DISPLACEMENT = 0.05; // min absolute x-displacement — prevents hand-raise triggering
+const SWIPE_MIN_WRIST_Y       = 0.70; // wrist must be in upper 70% of frame to start tracking (0=top,1=bottom)
 const SWIPE_MIN_DURATION      = 0.05; // seconds (min swipe duration — allows fast snapping swipes)
 const SWIPE_MAX_DURATION      = 2.0;  // seconds (max swipe duration)
 const PALM_HOLD_MS            = 150;  // stable palm hold for OPEN_MENU
@@ -203,6 +204,10 @@ function updateSwipe(side, hs, lms, mpConf, now) {
   const span = getHandSpan(lms);
 
   if (sw.state === "IDLE") {
+    if (wY >= SWIPE_MIN_WRIST_Y) {
+      console.log(`[SWIPE] wrist too low, y: ${wY.toFixed(3)}, waiting for hand to reach gesture zone`);
+      return null;
+    }
     sw.startX  = wX;
     sw.startY  = wY;
     sw.startTs = now;
